@@ -1,22 +1,12 @@
-"""
-extract_eth_swaps.py — Extraction des events Swap du pool ETH/USDC Uniswap V3
+"""extract_eth_swaps.py — Extraction des events Swap du pool ETH/USDC Uniswap V3
 (Ethereum mainnet) et estimation de la microstructure.
 
 Pool : 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640 (ETH/USDC 0.05%)
-- token0 = USDC (6 déc.), token1 = WETH (18 déc.) — VÉRIFIÉ ON-CHAIN
-- Convention : flux signé POSITIF = achat d'ETH par le taker → hausse de prix
+token0 = USDC (6 déc.), token1 = WETH (18 déc.) — vérifié on-chain.
+Convention : flux signé positif = achat d'ETH par le taker = hausse de prix.
 
-Étapes :
-1. Vérifier token0/token1 + décimales on-chain
-2. Récupérer les logs Swap sur ~24-48h par tranches de 2000 blocs
-3. Sauver eth_swaps.csv
-4. Contrôle cohérence prix ETH/USD vs CoinGecko
-5. Lancer les estimateurs microstructure
-6. Générer figures/eth_price_impact.png
-7. Sauver data/eth_microstructure.json
-
-RÈGLE : Côté ETH, données RÉELLES observées → on ESTIME (volatilité, lambda, spread).
-        Côté HLD, pas de transactions → on MODÉLISE (formule AMM).
+Côté ETH, données réelles observées, donc on estime (volatilité, lambda, spread).
+Côté HLD, pas de transactions, donc on modélise (formule AMM).
 """
 
 from __future__ import annotations
@@ -34,7 +24,6 @@ import pandas as pd
 from eth_utils import to_checksum_address
 from web3 import Web3
 
-# ── Chemins ────────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 FIG_DIR = REPO_ROOT / "figures"
@@ -45,7 +34,6 @@ CSV_PATH = DATA_DIR / "eth_swaps.csv"
 JSON_PATH = DATA_DIR / "eth_microstructure.json"
 PLOT_PATH = FIG_DIR / "eth_price_impact.png"
 
-# Importer les estimateurs
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from microstructure import (  # noqa: E402
     effective_spread,
@@ -56,13 +44,10 @@ from microstructure import (  # noqa: E402
 from microstructure import Q96 as _Q96  # noqa: E402
 Q96 = float(_Q96)
 
-# ── Constantes on-chain ────────────────────────────────────────────────────
 POOL_ADDRESS = to_checksum_address("0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640")
 
-# keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)")
 SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 
-# ── RPC Ethereum mainnet ───────────────────────────────────────────────────
 RPC_URLS = [
     "https://eth.llamarpc.com",
     "https://rpc.ankr.com/eth",
@@ -74,13 +59,11 @@ RPC_URLS = [
     "https://virginia.rpc.blxrbdn.com",
 ]
 
-# ── Fenêtre d'extraction ───────────────────────────────────────────────────
-LOOKBACK_HOURS = 36       # remonter N heures
-BLOCKS_PER_CHUNK = 500    # pagination eth_getLogs (petit pour eviter 403)
+LOOKBACK_HOURS = 36
+BLOCKS_PER_CHUNK = 500
 MAX_RETRIES = 2
-RETRY_DELAY = 3.0         # secondes entre chunks
+RETRY_DELAY = 3.0
 
-# ETH mainnet: ~12s par bloc → ~300 blocs/heure
 BLOCKS_PER_HOUR = 300
 
 
@@ -113,7 +96,6 @@ def verify_pool(w3):
     print(f"  token0 = {t0}")
     print(f"  token1 = {t1}")
 
-    # Décimales
     erc20_abi = [
         {"inputs": [], "name": "decimals", "outputs": [{"type": "uint8"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "symbol", "outputs": [{"type": "string"}], "stateMutability": "view", "type": "function"},
@@ -127,7 +109,7 @@ def verify_pool(w3):
     print(f"  {sym0} : {dec0} decimales")
     print(f"  {sym1} : {dec1} decimales")
 
-    is_eth = t1.lower() == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"  # WETH
+    is_eth = t1.lower() == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
     print(f"  token1 = WETH ? {is_eth}")
 
     return {
@@ -164,10 +146,7 @@ def fetch_swaps_with_retry(urls, from_block, to_block):
 
 
 def fetch_swaps(w3, from_block, to_block):
-    """Récupère les events Swap entre from_block et to_block (inclus).
-
-    Retourne une liste de dicts.
-    """
+    """Récupère les events Swap entre from_block et to_block (inclus)."""
     pct = (to_block - from_block) / BLOCKS_PER_HOUR
     print(f"  blocs {from_block} -> {to_block} ({pct:.1f}h)...", end=" ", flush=True)
 
@@ -177,12 +156,10 @@ def fetch_swaps(w3, from_block, to_block):
         print("ECHEC (tous RPCs)")
         return [], w3
 
-    # Cache de timestamps par bloc
     block_cache = {}
 
     swaps = []
     for log in logs:
-        # log["data"] peut etre HexBytes (web3.py) ou str hex
         raw_data = log["data"]
         if isinstance(raw_data, str):
             data_bytes = bytes.fromhex(raw_data[2:] if raw_data.startswith("0x") else raw_data)
@@ -195,7 +172,6 @@ def fetch_swaps(w3, from_block, to_block):
         liquidity = int.from_bytes(data_bytes[96:128], "big", signed=False)
         tick_raw = int.from_bytes(data_bytes[128:160], "big", signed=True)
 
-        # Timestamp du bloc (cache)
         block_num = log["blockNumber"]
         if block_num not in block_cache:
             try:
@@ -216,23 +192,15 @@ def fetch_swaps(w3, from_block, to_block):
         })
 
     print(f"{len(swaps)} swaps")
-    time.sleep(RETRY_DELAY)  # pause entre chunks
+    time.sleep(RETRY_DELAY)
     return swaps, w3
 
 
 def compute_eth_price(sqrt_price_x96, dec0, dec1):
-    """Prix ETH en USD depuis sqrtPriceX96.
-
-    Prix = amount0 / amount1 (token0 par token1, ajusté décimales).
-    token0 = USDC (6 déc.), token1 = WETH (18 déc.)
-    eth_usd = (1 / price_raw) * 10^(dec1 - dec0)
-    """
+    """Retourne le prix ETH en USD depuis sqrtPriceX96."""
     sqrt_p = sqrt_price_x96 / Q96
-    price_raw = sqrt_p * sqrt_p  # token1_raw / token0_raw = WETH_raw / USDC_raw
+    price_raw = sqrt_p * sqrt_p
 
-    # ETH/USD = USDC / WETH * ajustement décimales
-    # 1 / price_raw = USDC_raw / WETH_raw
-    # *(10^dec1 / 10^dec0) = (USDC/10^6) / (WETH/10^18) = USD / ETH
     eth_usd = (1.0 / price_raw) * (10 ** dec1) / (10 ** dec0)
     return eth_usd
 
@@ -245,7 +213,6 @@ def check_coherence(df, pool_info, w3):
     dec1 = pool_info["decimals1"]
 
     sqrt_px = df["sqrtPriceX96"].values
-    # Prendre les 100 derniers swaps pour le prix spot
     recent = sqrt_px[-100:]
     eth_prices = np.array([compute_eth_price(p, dec0, dec1) for p in recent])
     eth_mean = np.mean(eth_prices)
@@ -253,7 +220,6 @@ def check_coherence(df, pool_info, w3):
 
     print(f"  Prix ETH/USD (moyen 100 derniers swaps) : ${eth_mean:,.2f} +/- ${eth_std:,.2f}")
 
-    # CoinGecko
     try:
         import requests
         resp = requests.get(
@@ -266,7 +232,7 @@ def check_coherence(df, pool_info, w3):
             print(f"  CoinGecko ETH/USD              : ${cg_price:,.2f}")
             print(f"  Ecart                          : {ecart_pct:.2f}%")
             if ecart_pct > 2:
-                print(f"  ⚠️ Ecart > 2% — vérifier décimales ou pool.")
+                print(f"  Ecart > 2% — vérifier décimales ou pool.")
         else:
             cg_price = None
             print(f"  CoinGecko: HTTP {resp.status_code}")
@@ -278,7 +244,7 @@ def check_coherence(df, pool_info, w3):
 
 
 def plot_price_impact(df, pool_info, lambda_binned):
-    """Nuage de points : flux net (ETH) vs ΔP, avec droite de régression."""
+    """Génère le nuage de points flux net (ETH) vs ΔP avec droite de régression."""
     print("\n--- Generation figure ---")
 
     dec0 = pool_info["decimals0"]
@@ -290,7 +256,7 @@ def plot_price_impact(df, pool_info, lambda_binned):
         compute_eth_price(p, dec0, dec1)
         for p in np.asarray(df["sqrtPriceX96"], dtype=np.float64)
     ])
-    q_signed = -np.asarray(df["amount1"], dtype=np.float64) / (10 ** dec1)  # en ETH
+    q_signed = -np.asarray(df["amount1"], dtype=np.float64) / (10 ** dec1)
 
     t_start, t_end = tstamp[0], tstamp[-1]
     n_bins = max(1, int((t_end - t_start) / bin_sec))
@@ -314,7 +280,6 @@ def plot_price_impact(df, pool_info, lambda_binned):
     sc = ax.scatter(bin_flows, bin_dp, c=np.log1p(bin_counts),
                     cmap="Blues", alpha=0.6, edgecolors="grey", linewidth=0.3)
 
-    # Régression
     X = np.column_stack([np.ones(len(bin_flows)), bin_flows])
     beta, _, _, _ = np.linalg.lstsq(X, bin_dp, rcond=None)
     x_line = np.linspace(bin_flows.min(), bin_flows.max(), 100)
@@ -340,7 +305,6 @@ def main():
     print("UNISWAP V3 — Extraction swaps ETH/USDC (Ethereum mainnet)")
     print("=" * 72)
 
-    # ── 1. Connexion + vérification ──
     w3 = connect_rpc()
     chain_id = w3.eth.chain_id
     latest = w3.eth.block_number
@@ -350,7 +314,6 @@ def main():
 
     pool_info = verify_pool(w3)
 
-    # ── 2. Extraction des swaps ──
     blocks_back = LOOKBACK_HOURS * BLOCKS_PER_HOUR
     from_block = latest - blocks_back
     print(f"\n--- Extraction swaps ---")
@@ -371,22 +334,18 @@ def main():
         print("  Pas assez de swaps, elargir LOOKBACK_HOURS.")
         sys.exit(1)
 
-    # ── 3. Sauvegarde CSV ──
     df = pd.DataFrame(all_swaps)
     df = df.sort_values(["block", "timestamp"]).reset_index(drop=True)
     df.to_csv(CSV_PATH, index=False)
     print(f"  Sauvegarde -> {CSV_PATH} ({len(df)} lignes)")
 
-    # ── 4. Contrôle cohérence ──
     eth_mean, cg_price = check_coherence(df, pool_info, w3)
 
-    # ── 5. Estimateurs microstructure ──
     dec0 = pool_info["decimals0"]
     dec1 = pool_info["decimals1"]
 
     print("\n--- Estimateurs microstructure ---")
 
-    # Périodes d'échantillonnage réelles
     tstamp = np.asarray(df["timestamp"], dtype=np.float64)
     dt = np.diff(tstamp)
     avg_dt = np.mean(dt[dt > 0])
@@ -427,15 +386,11 @@ def main():
     print(f"    mean   = {es['mean_bps']:.2f} bps")
     print(f"    n      = {es['n_swaps']}")
 
-    # ── 6. Rescaling λ en unités lisibles ──
-    # microstructure.py travaille en token1/token0 (WETH/USDC).
-    # On convertit en USD/ETH² (token0/token1, positif = impact haussier).
-    # λ_usd = |λ_raw| / (spot_weth_per_usdc)²
     spot_weth_per_usdc = 1.0 / eth_mean if eth_mean > 0 else 0.000531
     rescale = 1.0 / (spot_weth_per_usdc ** 2)
 
     def _rescale_lambda(result_dict):
-        """Convertit λ en USD/ETH² + ajoute les champs rescaled."""
+        """Convertit lambda en USD/ETH^2 et ajoute les champs rescaled."""
         lam_raw = result_dict.get("lambda_", np.nan)
         se_raw = result_dict.get("std_err", np.nan)
         if not np.isnan(lam_raw):
@@ -459,11 +414,8 @@ def main():
     print(f"  lambda (binned 60s)  = {kb60.get('lambda_usd_per_eth2', np.nan):.6f} USD/ETH^2")
     print(f"  lambda (binned 300s) = {kb300.get('lambda_usd_per_eth2', np.nan):.6f} USD/ETH^2")
 
-    # ── 7. Figure ──
     plot_price_impact(df, pool_info, kb300)
 
-    # ── 8. Sauvegarde JSON ──
-    # Choisir le meilleur lambda (privilégier binned si R2 raw < 0.3)
     best_lambda = kb300 if (kt["r_squared"] < 0.3 and not np.isnan(kb300["lambda_"])) else kt
     lambda_method = "binned_300s" if kt["r_squared"] < 0.3 else "trade_by_trade"
 
@@ -500,7 +452,7 @@ def main():
             "ecart_pct": float(abs(eth_mean - cg_price) / cg_price * 100) if cg_price else None,
         },
         "estimates": {
-            "note": "ESTIMATIONS sur donnees REELLES observees. Pas des sorties de modele AMM.",
+            "note": "Estimations sur donnees reelles observees, pas des sorties de modele AMM.",
             "realized_volatility_annualized": float(rv),
             "kyle_lambda_trade_by_trade": {
                 "lambda": kt["lambda_"] if not np.isnan(kt["lambda_"]) else None,
@@ -538,7 +490,6 @@ def main():
         json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"\n  Resultats sauvegardes -> {JSON_PATH}")
 
-    # ── Récapitulatif ──
     lam_usd_tbt = kt.get("lambda_usd_per_eth2", np.nan)
     lam_usd_60 = kb60.get("lambda_usd_per_eth2", np.nan)
     lam_usd_300 = kb300.get("lambda_usd_per_eth2", np.nan)

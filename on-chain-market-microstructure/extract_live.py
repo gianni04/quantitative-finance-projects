@@ -1,31 +1,8 @@
 #!/usr/bin/env python3
-"""
-extract_live.py — Lecture directe de l'état du pool Uniswap V4 HLD/ETH sur Base.
+"""extract_live.py — Lecture directe de l'état du pool Uniswap V4 HLD/ETH sur Base.
 
-Lit le storage du PoolManager via extsload(bytes32) et décode:
-  - sqrtPriceX96, tick, lpFee, protocolFee (Slot0)
-  - Liquidité active L (uint128 à stateSlot + 3)
-  - Prix spot ETH → HLD
-
-Pool (Base mainnet):
-  PoolManager : 0x498581fF718922c3f8e6A244956aF099B2652b2b
-  HLD         : 0xd5b6cd58d75544aAD829CaE5396eb1fD53969dBa
-  currency0   : 0x0000000000000000000000000000000000000000 (ETH natif)
-  currency1   : 0xd5b6cd58d75544aAD829CaE5396eb1fD53969dBa (HLD)
-  fee         : 10000 (1 %)
-  tickSpacing : 200
-  hooks       : 0x0000000000000000000000000000000000000000
-
-Slot0 layout (Uniswap V4 Slot0.sol, MSB→LSB):
-  bytes  0-2  : padding (24 bits inutilisés)
-  bytes  3-5  : lpFee (uint24)       — bits 231–208
-  bytes  6-8  : protocolFee (uint24) — bits 207–184
-  bytes  9-11 : tick (int24)         — bits 183–160
-  bytes 12-31 : sqrtPriceX96 (uint160) — bits 159–0
-
-Vérifications:
-  - Sélecteur extsload(bytes32) : 0x1e2eaeaf
-  - PoolId                       : 0xa4ca172912412f8ef645dfc18ed9e10400a58d6df1bfbcc927b02bff8c0234dd
+Lit le storage du PoolManager via extsload(bytes32) et décode sqrtPriceX96,
+tick, lpFee, protocolFee (Slot0) et la liquidité active L.
 """
 
 import json
@@ -39,12 +16,11 @@ from eth_hash.auto import keccak
 from eth_utils import encode_hex, to_checksum_address
 from web3 import Web3
 
-# ── Constantes on-chain ────────────────────────────────────────────────
 POOL_MANAGER = to_checksum_address("0x498581fF718922c3f8e6A244956aF099B2652b2b")
 TOKEN_HLD    = to_checksum_address("0xd5b6cd58d75544aAD829CaE5396eb1fD53969dBa")
-CURRENCY_0   = "0x0000000000000000000000000000000000000000"  # ETH natif
-CURRENCY_1   = "0xd5b6cd58d75544aAD829CaE5396eb1fD53969dBa"  # HLD
-FEE          = 10000      # 1 %
+CURRENCY_0   = "0x0000000000000000000000000000000000000000"
+CURRENCY_1   = "0xd5b6cd58d75544aAD829CaE5396eb1fD53969dBa"
+FEE          = 10000
 TICK_SPACING = 200
 HOOKS        = "0x0000000000000000000000000000000000000000"
 
@@ -53,13 +29,11 @@ EXPECTED_POOL_ID  = "0xa4ca172912412f8ef645dfc18ed9e10400a58d6df1bfbcc927b02bff8
 POOLS_SLOT = 6
 Q96 = 2 ** 96
 
-# ── Fichiers de sortie ─────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent
 DATA_DIR  = REPO_ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 POOL_STATE_FILE = DATA_DIR / "pool_state.json"
 
-# ── RPC endpoints ──────────────────────────────────────────────────────
 RPC_URLS = [
     "https://mainnet.base.org",
     "https://base.llamarpc.com",
@@ -110,25 +84,16 @@ def extsload(w3: Web3, slot: bytes) -> bytes:
 
 
 def unpack_slot0(raw: bytes):
-    """Décode le Slot0 selon le layout Uniswap V4 (MSB→LSB).
-
-    Layout (bits 255→0):
-      bits 255–232 : padding (24 bits)
-      bits 231–208 : lpFee (uint24)
-      bits 207–184 : protocolFee (uint24)
-      bits 183–160 : tick (int24)
-      bits 159–0   : sqrtPriceX96 (uint160)
-    """
+    """Décode le Slot0 selon le layout Uniswap V4 (MSB→LSB)."""
     assert len(raw) == 32, f"Slot0 doit faire 32 bytes, reçu {len(raw)}"
 
-    lp_fee    = int.from_bytes(raw[3:6], "big")    # bytes 3-5
-    proto_fee = int.from_bytes(raw[6:9], "big")    # bytes 6-8
-    tick_raw  = int.from_bytes(raw[9:12], "big")   # bytes 9-11
-    # Sign-extend int24
+    lp_fee    = int.from_bytes(raw[3:6], "big")
+    proto_fee = int.from_bytes(raw[6:9], "big")
+    tick_raw  = int.from_bytes(raw[9:12], "big")
     if tick_raw >= 2 ** 23:
         tick_raw -= 2 ** 24
     tick = tick_raw
-    sqrt_price_x96 = int.from_bytes(raw[12:32], "big")  # bytes 12-31
+    sqrt_price_x96 = int.from_bytes(raw[12:32], "big")
 
     return {
         "sqrtPriceX96": sqrt_price_x96,
@@ -139,12 +104,9 @@ def unpack_slot0(raw: bytes):
 
 
 def compute_spot_price(sqrt_price_x96: int) -> tuple[float, float]:
-    """Retourne (hld_per_eth, eth_per_hld).
-
-    sqrtPriceX96 = sqrt(price) * 2^96, price = amount1/amount0 = HLD/ETH.
-    """
+    """Retourne (hld_per_eth, eth_per_hld)."""
     sqrt_p = sqrt_price_x96 / Q96
-    price = sqrt_p * sqrt_p  # HLD per ETH, éviter **2 qui perd en précision
+    price = sqrt_p * sqrt_p
     eth_per_hld = 1.0 / price if price > 0 else float("inf")
     return price, eth_per_hld
 
@@ -152,7 +114,6 @@ def compute_spot_price(sqrt_price_x96: int) -> tuple[float, float]:
 def extract(w3: Web3) -> dict:
     """Extraction complète de l'état du pool."""
 
-    # ── 1. Vérifier le sélecteur extsload ──
     print("1. Vérification du sélecteur extsload(bytes32)…")
     code = w3.eth.get_code(POOL_MANAGER).hex()
     if EXTSLOAD_SELECTOR[2:] not in code:
@@ -160,7 +121,6 @@ def extract(w3: Web3) -> dict:
         sys.exit(1)
     print(f"  ✓ Sélecteur {EXTSLOAD_SELECTOR} confirmé.")
 
-    # ── 2. Calculer et vérifier le PoolId ──
     print("\n2. Calcul du PoolId…")
     pool_id = compute_pool_id()
     pool_id_hex = "0x" + pool_id.hex()
@@ -172,12 +132,10 @@ def extract(w3: Web3) -> dict:
         sys.exit(1)
     print(f"  ✓ PoolId vérifié.")
 
-    # ── 3. Calcul du stateSlot et lecture ──
     print("\n3. Lecture du Pool.State via extsload…")
     state_slot = compute_state_slot(pool_id)
     print(f"  stateSlot       : {encode_hex(state_slot)}")
 
-    # Slot0
     raw_slot0 = extsload(w3, state_slot)
     print(f"  Slot0 brut      : 0x{raw_slot0.hex()}")
     slot0 = unpack_slot0(raw_slot0)
@@ -192,21 +150,17 @@ def extract(w3: Web3) -> dict:
     print(f"  lpFee            : {lp_fee} pips ({lp_fee / 1_000_000:.2%})")
     print(f"  protocolFee      : {proto_fee}")
 
-    # Liquidité (uint128 au slot stateSlot + 3)
     liq_slot_num = int.from_bytes(state_slot, "big") + 3
     liq_slot_bytes = liq_slot_num.to_bytes(32, "big")
     raw_liquidity = extsload(w3, liq_slot_bytes)
-    # uint128 = 16 bytes de poids faible dans le slot (bits 127→0 = bytes 16→31)
     liquidity = int.from_bytes(raw_liquidity[16:32], "big")
     print(f"  L (uint128)      : {liquidity}")
 
-    # ── 4. Prix spot ──
     print("\n4. Prix spot…")
     hld_per_eth, eth_per_hld = compute_spot_price(sqrt_price_x96)
     print(f"  1 ETH = {hld_per_eth:,.4f} HLD")
     print(f"  1 HLD = {eth_per_hld:.10f} ETH")
 
-    # Vérification cohérence tick ⇔ sqrtPriceX96
     price_from_tick = 1.0001 ** tick
     ratio = price_from_tick / hld_per_eth if hld_per_eth > 0 else float("inf")
     consistent = abs(ratio - 1.0) < 0.01
@@ -214,17 +168,15 @@ def extract(w3: Web3) -> dict:
     print(f"  Ratio tick/sqrtPX96 = {ratio:.6f}")
     print(f"  ✓ Cohérence : {'OK' if consistent else 'ÉCART >1% — layout à vérifier'}")
 
-    # ── 5. Méta-données du bloc ──
     block = w3.eth.get_block("latest")
     block_number = block["number"]
     block_timestamp = block["timestamp"]
     block_datetime = datetime.fromtimestamp(block_timestamp, tz=timezone.utc)
     print(f"\n5. Bloc #{block_number} du {block_datetime.isoformat()}")
 
-    # ── 6. Réserves virtuelles (pour contexte) ──
     sqrt_p = sqrt_price_x96 / Q96
-    x_virt = liquidity / sqrt_p    # ETH virtuels
-    y_virt = liquidity * sqrt_p    # HLD virtuels
+    x_virt = liquidity / sqrt_p
+    y_virt = liquidity * sqrt_p
     print(f"\n6. Réserves virtuelles (modèle constant-product):")
     print(f"  x_virt (ETH)  = {x_virt:,.6f}")
     print(f"  y_virt (HLD)  = {y_virt:,.0f}")
@@ -278,7 +230,6 @@ def main():
     state = extract(w3)
     save_state(state)
 
-    # ── Récapitulatif ──
     print("\n" + "=" * 72)
     print("RÉCAPITULATIF")
     print("=" * 72)

@@ -1,20 +1,7 @@
-"""
-microstructure.py — Estimateurs de microstructure (Volatilité, Kyle λ, Spread effectif).
-
-VALIDÉ sur données synthétiques (constant-product AMM simulé).
-Fonctionne sur données réelles (Uniswap V3/V4 Swap events).
+"""microstructure.py — Estimateurs de microstructure (volatilité, Kyle lambda, spread effectif).
 
 Convention d'entrée — DataFrame avec colonnes :
   block, timestamp, amount0, amount1, sqrtPriceX96, liquidity, tick
-
-amount0/amount1 : signés comme émis par le contrat (positif = flux entrant dans le pool).
-sqrtPriceX96    : prix POST-swap (tel qu'émis dans l'event Swap).
-
-Fonctions :
-  realized_volatility(df, periods_per_year) → float
-  kyle_lambda(df, dec0, dec1) → dict  (trade-by-trade)
-  kyle_lambda_binned(df, bin_sec, dec0, dec1) → dict  (agrégé par fenêtre)
-  effective_spread(df, dec0, dec1) → dict  (médian, moyen en bps)
 """
 
 from __future__ import annotations
@@ -25,35 +12,19 @@ from scipy import stats
 Q96 = float(2 ** 96)
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
-
 def _sqrtpx96_to_price(sqrtPX96):
-    """Convertit sqrtPriceX96 → price = amount1/amount0 (raw tokens)."""
+    """Convertit sqrtPriceX96 en price = amount1/amount0 (raw tokens)."""
     sqrt_p = np.asarray(sqrtPX96, dtype=np.float64) / Q96
     return sqrt_p * sqrt_p
 
 
 def _raw_price_to_human(price_raw, dec0, dec1):
-    """Convertit price_raw (token1/token0 raw) en prix humain.
-
-    price_raw = amount1_raw / amount0_raw
-    price_human = (amount1 / 10^dec1) / (amount0 / 10^dec0)
-                = price_raw * 10^(dec0 - dec1)
-    """
+    """Convertit price_raw (token1/token0 raw) en prix humain."""
     return price_raw * (10 ** (dec0 - dec1))
 
 
 def _compute_flows_and_returns(df, dec0, dec1):
-    """Calcule les flux signés et rendements entre swaps consécutifs.
-
-    Retourne des arrays numpy alignés (taille n-1) :
-      dt_sec       : delta temps entre swaps
-      dp_human     : variation de prix (prix humain, positif = hausse)
-      ret          : log-rendement
-      q_signed     : flux net signé en unités de token1 (positif = achat token1 par taker)
-      trade_size   : volume échangé en unités humaines de token1
-      is_buy       : bool, True si achat token1
-    """
+    """Calcule les flux signés et rendements entre swaps consécutifs."""
     n = len(df)
     if n < 2:
         raise ValueError("Need at least 2 swaps for differencing.")
@@ -63,28 +34,17 @@ def _compute_flows_and_returns(df, dec0, dec1):
     amt0 = np.asarray(df["amount0"], dtype=np.float64)
     amt1 = np.asarray(df["amount1"], dtype=np.float64)
 
-    # Prix humain (token0 par token1, e.g. USDC/ETH)
-    price_raw = _sqrtpx96_to_price(sqrt_px)       # token1/token0 raw
-    price_human = _raw_price_to_human(price_raw, dec0, dec1)  # token0/token1 human
+    price_raw = _sqrtpx96_to_price(sqrt_px)
+    price_human = _raw_price_to_human(price_raw, dec0, dec1)
 
-    # Flux signé : du point de vue du taker
-    # amount1 > 0 → token1 ENTRE dans le pool → taker VEND token1
-    # amount1 < 0 → token1 SORT du pool → taker ACHÈTE token1
-    # q_signed > 0 = taker achète token1
-    q_signed = -amt1 / (10 ** dec1)  # en unités humaines de token1
-
-    # Volume échangé (valeur absolue)
+    q_signed = -amt1 / (10 ** dec1)
     trade_size = np.abs(q_signed)
 
-    # Différences entre swaps consécutifs
-    dp_human = np.diff(price_human)   # prix[i] - prix[i-1], taille n-1
+    dp_human = np.diff(price_human)
     ret = np.diff(np.log(np.maximum(price_human, 1e-30)))
     dt_sec = np.diff(tstamp)
-    dt_sec[dt_sec <= 0] = 1e-9  # éviter division par zéro
+    dt_sec[dt_sec <= 0] = 1e-9
 
-    # Aligner : le swap i (flux q_signed[i]) cause le prix POST-swap price_human[i].
-    # La variation causée par le swap i est donc price_human[i] - price_human[i-1].
-    # On pair q_signed[1:] avec dp_human[0:] (toutes tailles n-1).
     q_signed_aligned = q_signed[1:]
     trade_size_aligned = trade_size[1:]
     is_buy_aligned = q_signed_aligned > 0
@@ -101,32 +61,13 @@ def _compute_flows_and_returns(df, dec0, dec1):
     }
 
 
-# ── Estimateurs ─────────────────────────────────────────────────────────────
-
 def realized_volatility(df, periods_per_year=365 * 24 * 3600):
-    """Volatilité réalisée annualisée.
-
-    Calcule l'écart-type des log-rendements entre swaps consécutifs
-    et l'annualise avec periods_per_year.
-
-    Parameters
-    ----------
-    df : DataFrame
-        Swaps avec colonnes timestamp, sqrtPriceX96, amount0, amount1.
-    periods_per_year : int or float
-        Nombre de périodes d'échantillonnage par an.
-        Par défaut : secondes par an (pour annualiser du pas-à-pas).
-
-    Returns
-    -------
-    float : volatilité annualisée (σ)
-    """
+    """Retourne la volatilité réalisée annualisée."""
     price_raw = _sqrtpx96_to_price(np.asarray(df["sqrtPriceX96"], dtype=np.float64))
     ret = np.diff(np.log(np.maximum(price_raw, 1e-30)))
     if len(ret) < 2:
         return np.nan
     sigma_per_step = np.std(ret, ddof=1)
-    # Pondération par l'intervalle réel (harmonique des dt)
     dt = np.diff(np.asarray(df["timestamp"], dtype=np.float64))
     dt = dt[dt > 0]
     if len(dt) == 0:
@@ -136,21 +77,7 @@ def realized_volatility(df, periods_per_year=365 * 24 * 3600):
 
 
 def kyle_lambda(df, dec0, dec1):
-    """Lambda de Kyle trade-by-trade : ΔP = λ · Q + ε.
-
-    Régression OLS du changement de prix sur le flux signé.
-    Chaque swap individuel est une observation.
-
-    Parameters
-    ----------
-    df : DataFrame
-    dec0 : int — décimales token0
-    dec1 : int — décimales token1
-
-    Returns
-    -------
-    dict avec clés : lambda_, std_err, t_stat, r_squared, n_obs
-    """
+    """Retourne le lambda de Kyle trade-by-trade (dict: lambda_, std_err, t_stat, r_squared, n_obs)."""
     flows = _compute_flows_and_returns(df, dec0, dec1)
     dp = flows["dp_human"]
     q = flows["q_signed"]
@@ -160,7 +87,6 @@ def kyle_lambda(df, dec0, dec1):
         return {"lambda_": np.nan, "std_err": np.nan, "t_stat": np.nan,
                 "r_squared": np.nan, "n_obs": n}
 
-    # ΔP = α + λ·Q + ε
     X = np.column_stack([np.ones(n), q])
     y = dp
     try:
@@ -171,7 +97,6 @@ def kyle_lambda(df, dec0, dec1):
         ss_tot = np.sum((y - np.mean(y)) ** 2)
         r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-        # Erreur standard (matrice de covariance OLS)
         dof = max(1, n - 2)
         sigma2 = ss_res / dof
         XtX_inv = np.linalg.inv(X.T @ X)
@@ -192,22 +117,7 @@ def kyle_lambda(df, dec0, dec1):
 
 
 def kyle_lambda_binned(df, bin_sec, dec0, dec1):
-    """Lambda de Kyle agrégé par fenêtres de temps.
-
-    Regroupe les swaps par bins de `bin_sec` secondes,
-    somme les flux signés, calcule la variation de prix sur le bin.
-
-    Parameters
-    ----------
-    df : DataFrame
-    bin_sec : int — taille des bins en secondes (ex: 60, 300)
-    dec0 : int
-    dec1 : int
-
-    Returns
-    -------
-    dict avec clés : lambda_, std_err, t_stat, r_squared, n_bins
-    """
+    """Retourne le lambda de Kyle agrégé par fenêtres de bin_sec secondes."""
     tstamp = np.asarray(df["timestamp"], dtype=np.float64)
     t_start = tstamp[0]
     t_end = tstamp[-1]
@@ -225,7 +135,6 @@ def kyle_lambda_binned(df, bin_sec, dec0, dec1):
     )
     q_signed = -np.asarray(df["amount1"], dtype=np.float64) / (10 ** dec1)
 
-    # Prix au début et fin de chaque bin
     bin_prices_start = np.full(n_bins, np.nan)
     bin_prices_end = np.full(n_bins, np.nan)
     bin_net_flow = np.zeros(n_bins)
@@ -238,7 +147,6 @@ def kyle_lambda_binned(df, bin_sec, dec0, dec1):
             bin_prices_end[i] = price_human[idx[-1]]
             bin_net_flow[i] = np.sum(q_signed[mask])
 
-    # ΔP intra-bin = flux net du bin → variation de prix dans le bin
     valid = ~np.isnan(bin_prices_start) & ~np.isnan(bin_prices_end)
     dp_bins = bin_prices_end[valid] - bin_prices_start[valid]
     q_bins = bin_net_flow[valid]
@@ -278,23 +186,7 @@ def kyle_lambda_binned(df, bin_sec, dec0, dec1):
 
 
 def effective_spread(df, dec0, dec1):
-    """Spread effectif (médian, moyen) en points de base.
-
-    Pour chaque swap, compare le prix d'exécution au mid-price
-    avant le trade (approché par le prix du swap précédent).
-
-    effective_spread = 2 * |exec - mid| / mid * 10000  [bps]
-
-    Parameters
-    ----------
-    df : DataFrame
-    dec0 : int
-    dec1 : int
-
-    Returns
-    -------
-    dict : {median_bps, mean_bps, n_swaps}
-    """
+    """Retourne le spread effectif médian/moyen en bps (dict: median_bps, mean_bps, n_swaps)."""
     n = len(df)
     if n < 2:
         return {"median_bps": np.nan, "mean_bps": np.nan, "n_swaps": n}
@@ -306,13 +198,9 @@ def effective_spread(df, dec0, dec1):
     amt1 = np.asarray(df["amount1"], dtype=np.float64)
     amt0 = np.asarray(df["amount0"], dtype=np.float64)
 
-    # Prix d'exécution en token1/token0 (même convention que price_human)
-    # exec_price = |amount1/10^dec1| / |amount0/10^dec0|
     exec_price = np.abs(amt1 / (10 ** dec1)) / np.abs(amt0 / (10 ** dec0))
-    # Éviter division par zéro
     exec_price = np.where((np.abs(amt0) > 0) & (np.abs(amt1) > 0), exec_price, np.nan)
 
-    # Mid-price avant le trade = prix du swap précédent
     mid_before = np.roll(price_human, 1)
     mid_before[0] = np.nan
 
@@ -329,18 +217,15 @@ def effective_spread(df, dec0, dec1):
     }
 
 
-# ── Self-check ──────────────────────────────────────────────────────────────
-
 def _demo():
-    """Test sur données synthétiques (pool constant-product simulé)."""
+    """Auto-test sur données synthétiques (pool constant-product simulé)."""
     import pandas as pd
 
     np.random.seed(42)
     n = 500
-    # Prix initial : 1 ETH = 2000 USDC, token0=USDC(6), token1=WETH(18)
     dec0, dec1 = 6, 18
     px_human = 2000.0
-    price_raw = px_human * (10 ** dec1) / (10 ** dec0)  # token1/token0 raw
+    price_raw = px_human * (10 ** dec1) / (10 ** dec0)
     sqrt_p = np.sqrt(price_raw)
     sqrtPX96_base = int(sqrt_p * Q96)
 
@@ -349,10 +234,8 @@ def _demo():
 
     records = []
     for i in range(n):
-        # Simuler un trade : flux signé ~ N(0, 0.5 ETH)
-        q_eth = np.random.normal(0, 0.5)  # en ETH, signé (positif = achat)
-        # Kyle model : ΔP = λ * Q + ε
-        lam_true = 5.0  # 5 USDC de slippage par ETH tradé
+        q_eth = np.random.normal(0, 0.5)
+        lam_true = 5.0
         dp = lam_true * q_eth + np.random.normal(0, 0.02)
         px_human_new = px_human + dp
         px_human_new = max(px_human_new, 0.01)
@@ -360,9 +243,7 @@ def _demo():
         price_raw_new = px_human_new * (10 ** dec1) / (10 ** dec0)
         sqrtPX96 = int(np.sqrt(price_raw_new) * Q96)
 
-        # amount0/amount1 reconstruits
-        # Pour un achat d'ETH (q_eth > 0) : USDC entre (amount0 > 0), ETH sort (amount1 < 0)
-        usdc_amount = abs(q_eth) * px_human  # USDC échangés
+        usdc_amount = abs(q_eth) * px_human
         amt0 = int(usdc_amount * 10 ** dec0) if q_eth > 0 else -int(usdc_amount * 10 ** dec0)
         amt1 = -int(abs(q_eth) * 10 ** dec1) if q_eth > 0 else int(abs(q_eth) * 10 ** dec1)
 
@@ -383,11 +264,9 @@ def _demo():
     print(f"Swaps simules  : {n}")
     print(f"lambda vrai    : {lam_true}\n")
 
-    # 1. Volatilité
     rv = realized_volatility(df, periods_per_year=365 * 24 * 3600)
     print(f"Volatilité réalisée annualisée : {rv:.4f}")
 
-    # 2. Kyle trade-by-trade
     kt = kyle_lambda(df, dec0, dec1)
     print(f"\nKyle lambda (trade-by-trade):")
     print(f"  lambda  = {kt['lambda_']:.4f}")
@@ -396,7 +275,6 @@ def _demo():
     print(f"  R2      = {kt['r_squared']:.4f}")
     print(f"  n_obs   = {kt['n_obs']}")
 
-    # 3. Kyle binned
     kb60 = kyle_lambda_binned(df, 60, dec0, dec1)
     kb300 = kyle_lambda_binned(df, 300, dec0, dec1)
     print(f"\nKyle lambda (binned 60s):")
@@ -408,14 +286,12 @@ def _demo():
     print(f"  R2      = {kb300['r_squared']:.4f}")
     print(f"  n_bins  = {kb300['n_bins']}")
 
-    # 4. Spread effectif
     es = effective_spread(df, dec0, dec1)
     print(f"\nSpread effectif :")
     print(f"  médian = {es['median_bps']:.2f} bps")
     print(f"  moyen  = {es['mean_bps']:.2f} bps")
     print(f"  n      = {es['n_swaps']}")
 
-    # Verifications
     print("\n--- Verifications ---")
     assert 3 < kt["lambda_"] < 7, f"lambda trade-by-trade hors bornes: {kt['lambda_']:.2f}"
     assert 3 < kb60["lambda_"] < 7, f"lambda binned 60s hors bornes: {kb60['lambda_']:.2f}"

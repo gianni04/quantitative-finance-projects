@@ -1,15 +1,9 @@
-"""
-plots.py — Visualisations de la micro-structure du pool HLD/ETH (Uniswap V4).
+"""plots.py — Visualisations de la micro-structure du pool HLD/ETH (Uniswap V4).
 
-DONNÉES RÉELLES (on-chain, lues via extract_live.py → data/pool_state.json):
-  - sqrtPriceX96, tick, lpFee, liquidité L
-
-SORTIES DE MODÈLE (constant-product x*y=k appliqué aux réserves réelles):
-  - courbes de coût d'exécution modélisé (slippage)
-  - profil de liquidité
-
-⚠️  Le coût d'exécution présenté est MODÉLISÉ, pas observé.
-    Toujours lire « coût d'exécution modélisé », jamais « slippage observé ».
+Les données de pool (sqrtPriceX96, tick, lpFee, liquidité) sont réelles, lues
+via extract_live.py. Les courbes de coût d'exécution sont des sorties de
+modèle constant-product (x*y=k) appliqué à ces réserves, pas des transactions
+observées.
 """
 
 import json
@@ -30,36 +24,25 @@ def load_pool_state():
 
 
 def compute_virtual_reserves(L, sqrt_price):
-    """Réserves virtuelles x (ETH) et y (HLD) depuis liquidité et sqrt(price).
-
-    x = L / sqrt(P)   (ETH virtuels)
-    y = L * sqrt(P)   (HLD virtuels)
-    Returns (x, y) in raw token amounts.
-    """
+    """Retourne les réserves virtuelles x (ETH) et y (HLD) en raw token amounts."""
     x = L / sqrt_price
     y = L * sqrt_price
     return x, y
 
 
 def constant_product_slippage(x, y, trade_hld_amount, is_buy):
-    """Coût d'exécution MODÉLISÉ pour un trade de taille trade_hld_amount en HLD.
-
-    Modèle constant-product: x * y = k.
-    Retourne (prix_moyen_hld_per_eth, cost_bps).
-    """
+    """Retourne (prix_moyen_hld_per_eth, cost_bps) pour un trade modélisé en constant-product."""
     k = x * y
     if is_buy:
-        # Acheter HLD → envoyer ETH (dx), recevoir HLD (dy = trade_hld_amount)
         dy = trade_hld_amount
         new_y = y - dy
         if new_y <= 0:
             return float("inf"), float("inf")
         new_x = k / new_y
         dx = new_x - x
-        avg_price = dy / dx  # HLD par ETH
+        avg_price = dy / dx
         spot = y / x
     else:
-        # Vendre HLD → envoyer HLD (dy = trade_hld_amount), recevoir ETH (dx)
         dy = trade_hld_amount
         new_y = y + dy
         new_x = k / new_y
@@ -80,16 +63,14 @@ def plot_slippage_curve(state):
     x, y = compute_virtual_reserves(L, sqrt_p)
     spot_hld_per_eth = y / x
 
-    # Tailles de trade en HLD (échelle log)
-    # Max: ~100% de la réserve HLD
     max_trade = y * 0.9
     sizes_hld = np.logspace(1, np.log10(max_trade), 500)
     costs_bps = []
     for size in sizes_hld:
         _, cost = constant_product_slippage(x, y, size, is_buy=True)
-        costs_bps.append(min(cost, 10000))  # cap à 100% (10000 bps)
+        costs_bps.append(min(cost, 10000))
 
-    sizes_m_hld = sizes_hld / 1e6  # Convertir en millions de HLD
+    sizes_m_hld = sizes_hld / 1e6
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(sizes_m_hld, costs_bps, linewidth=2, color="#2172E5")
@@ -100,7 +81,6 @@ def plot_slippage_curve(state):
     ax.set_title("Coût d'exécution modélisé — Pool HLD/ETH (Uniswap V4, Base)")
     ax.grid(True, alpha=0.3, which="both")
 
-    # Annotations
     ax.axhline(100, color="orange", linestyle="--", alpha=0.5, label="1 % (lpFee)")
     ax.axhline(10000, color="red", linestyle="--", alpha=0.3, label="100 %")
     ax.legend()
@@ -118,17 +98,15 @@ def plot_depth(state):
     sqrt_p_spot = state["sqrtPriceX96"] / Q96
     spot_hld_per_eth = sqrt_p_spot ** 2
 
-    # ±20 % autour du spot
     prices = np.linspace(spot_hld_per_eth * 0.80, spot_hld_per_eth * 1.20, 200)
     eth_amounts = []
     for p in prices:
         sp = np.sqrt(p)
-        x_virt = L / sp  # ETH
+        x_virt = L / sp
         eth_amounts.append(x_virt)
 
-    # Convertir en USD-equivalent
     eth_eur = state.get("eth_eur", 1645.88)
-    eth_usd_per_eth = eth_eur / 0.92  # ~EUR→USD
+    eth_usd_per_eth = eth_eur / 0.92
 
     fig, ax1 = plt.subplots(figsize=(10, 5))
     color = "#2172E5"
@@ -150,7 +128,7 @@ def plot_depth(state):
 
 
 def plot_summary(state):
-    """Dashboard récapitulatif."""
+    """Génère le dashboard récapitulatif."""
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     fig.suptitle(f"HLD/ETH Pool — Bloc #{state['block']} ({state['timestamp_utc'][:10]})",
                  fontsize=14, fontweight="bold")
@@ -162,7 +140,6 @@ def plot_summary(state):
     x, y = compute_virtual_reserves(L, sqrt_p)
     eth_eur = state.get("eth_eur", 1645.88)
 
-    # KPI 1: Prix spot
     ax = axes[0, 0]
     ax.axis("off")
     hld_price_eur = state["spot_price"]["eth_per_hld"] * eth_eur
@@ -176,10 +153,9 @@ def plot_summary(state):
             verticalalignment="center", horizontalalignment="center",
             bbox=dict(boxstyle="round", facecolor="#f0f4ff", alpha=0.8))
 
-    # KPI 2: Liquidité
     ax = axes[0, 1]
     ax.axis("off")
-    pool_value_eth = 2 * x  # x = ETH par côté
+    pool_value_eth = 2 * x
     text = (
         f"Liquidité L = {L:,.0f}\n"
         f"ETH virtuels = {x:,.6f}\n"
@@ -190,7 +166,6 @@ def plot_summary(state):
             verticalalignment="center", horizontalalignment="center",
             bbox=dict(boxstyle="round", facecolor="#fff8f0", alpha=0.8))
 
-    # KPI 3: Frais
     ax = axes[1, 0]
     ax.axis("off")
     text = (
@@ -203,7 +178,6 @@ def plot_summary(state):
             verticalalignment="center", horizontalalignment="center",
             bbox=dict(boxstyle="round", facecolor="#f0fff0", alpha=0.8))
 
-    # KPI 4: Courbe slippage simplifiée
     ax = axes[1, 1]
     sizes_hld = np.logspace(1, np.log10(y * 0.5), 200)
     costs = []

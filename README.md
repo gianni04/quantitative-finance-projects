@@ -139,7 +139,6 @@ pip install numpy pandas scipy yfinance matplotlib plotly ipywidgets
 
 ## Author
 
-**Gianni Pilotti**  
-Economics & Finance Student — Portfolio Risk & Quantitative Methods  
-University of Luxembourg (Bachelor, expected January 2027)  
+**Gianni Pilotti** — quantitative finance, portfolio risk & derivatives pricing.
+University of Luxembourg (Economics & Finance, Bachelor, expected January 2027).
 [LinkedIn](https://www.linkedin.com/in/gianni-pilotti-9152832a4/) · [GitHub](https://github.com/gianni04)

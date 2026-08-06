@@ -113,14 +113,11 @@ python src/plots.py                    # regenerate figures
 jupyter notebook notebooks/analysis.ipynb
 ```
 
-## Limitations
-
-Constant-product is a local approximation of V4 concentrated liquidity; HLD execution cost is
-modelled, not observed; the linear extrapolation of Kyle's lambda to a 1% move is an
-order-of-magnitude estimate; the ETH estimation covers a 36 h window. See the report for full
-discussion.
+Constant-product is a local approximation of V4 concentrated liquidity, HLD execution cost is
+modelled rather than observed, the linear extrapolation of Kyle's lambda to a 1% move is an
+order-of-magnitude estimate, and the ETH estimation covers a 36 h window. Full discussion in the
+report.
 
 ---
 
-*Author: **Gianni Pilotti** — Economics & Finance student, University of Luxembourg.
-Market-finance / quantitative trading portfolio project. Not investment advice.*
+*Gianni Pilotti — quantitative finance.*
