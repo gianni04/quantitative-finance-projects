@@ -88,8 +88,8 @@ Python · NumPy · SciPy · Plotly · ipywidgets
 
 ## 3. EUR/US Yield Curve Analysis
 
-**Notebook:** `EUR_US_Yield_Curveipynb.ipynb`  
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gianni04/quantitative-finance-projects/blob/main/EUR_US_Yield_Curveipynb.ipynb)
+**Notebook:** `EUR_US_Yield_Curve.ipynb`  
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gianni04/quantitative-finance-projects/blob/main/EUR_US_Yield_Curve.ipynb)
 
 ### What it does
 Analyses and visualises the EUR and USD government yield curves across maturities, exploring the term structure of interest rates and key spread dynamics.
@@ -103,7 +103,7 @@ Python · pandas · Matplotlib
 
 ## 4. On-Chain Market Microstructure — Nascent AMM Pool vs Mature Market
 
-**Folder:** [`on-chain-market-microstructure/`](on-chain-market-microstructure/) · **Report (PDF):** [`report/rapport.pdf`](on-chain-market-microstructure/report/rapport.pdf)
+**Repository:** [`gianni04/on-chain-market-microstructure`](https://github.com/gianni04/on-chain-market-microstructure) · **Report (PDF):** [`report/rapport.pdf`](https://github.com/gianni04/on-chain-market-microstructure/blob/master/report/rapport.pdf)
 
 ### What it does
 A comparative market-microstructure study of two Automated Market Maker (AMM) regimes, using **real on-chain data**: a freshly-deployed illiquid token pool (**HLD/ETH**, Uniswap V4 on Base) characterised **analytically**, versus a deep, actively-traded pool (**ETH/USDC**, Uniswap V3 on Ethereum) estimated **econometrically on 6,737 real swaps**.
